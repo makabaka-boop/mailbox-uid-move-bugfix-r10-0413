@@ -18,6 +18,14 @@ func renderEvent(ev Event) []byte {
 			fmt.Fprintf(&b, "* APPENDUID %d %d\r\n", ev.UIDValidity, uid)
 		}
 		fmt.Fprintf(&b, "* REVISION %d\r\n", ev.Revision)
+	case EventMoveOut:
+		// One EXPUNGE per removed message, sequence numbers as of before the
+		// whole batch, accounting for earlier removals in the same operation.
+		for _, seq := range ev.SeqNums {
+			fmt.Fprintf(&b, "* %d EXPUNGE\r\n", seq)
+		}
+		fmt.Fprintf(&b, "* %d EXISTS\r\n", ev.Exists)
+		fmt.Fprintf(&b, "* REVISION %d\r\n", ev.Revision)
 	case EventStore:
 		for _, msg := range ev.Messages {
 			fmt.Fprintf(&b, "* %d FETCH (UID %d FLAGS (%s))\r\n",

@@ -377,11 +377,67 @@ func parseUIDSet(text string) ([]int64, error) {
 	return uids, nil
 }
 
+// parseMoveUIDSet parses a UID set for UID MOVE: unlike FETCH/STORE it must be
+// a nonempty list of concrete UIDs (no "*" wildcard) with no duplicates, so
+// the COPYUID old/new lists describe exactly one action per UID.
+func parseMoveUIDSet(text string) ([]int64, error) {
+	if text == "" || text == "*" {
+		return nil, fmt.Errorf("UID MOVE requires a nonempty UID set")
+	}
+	parts := strings.Split(text, ",")
+	var uids []int64
+	seen := map[int64]bool{}
+	addUID := func(uid int64) error {
+		if seen[uid] {
+			return fmt.Errorf("duplicate UID %d in set", uid)
+		}
+		seen[uid] = true
+		uids = append(uids, uid)
+		return nil
+	}
+	for _, part := range parts {
+		if part == "" {
+			return nil, fmt.Errorf("empty UID in set")
+		}
+		if strings.Contains(part, ":") {
+			bounds := strings.Split(part, ":")
+			if len(bounds) != 2 {
+				return nil, fmt.Errorf("invalid UID range")
+			}
+			if bounds[0] == "*" || bounds[1] == "*" {
+				return nil, fmt.Errorf("UID MOVE requires concrete UIDs, not %q", part)
+			}
+			start, err := strconv.ParseInt(bounds[0], 10, 64)
+			if err != nil || start <= 0 {
+				return nil, fmt.Errorf("invalid UID range")
+			}
+			end, err := strconv.ParseInt(bounds[1], 10, 64)
+			if err != nil || end < start {
+				return nil, fmt.Errorf("invalid UID range")
+			}
+			for uid := start; uid <= end; uid++ {
+				if err := addUID(uid); err != nil {
+					return nil, err
+				}
+			}
+		} else {
+			uid, err := strconv.ParseInt(part, 10, 64)
+			if err != nil || uid <= 0 {
+				return nil, fmt.Errorf("invalid UID %q", part)
+			}
+			if err := addUID(uid); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return uids, nil
+}
+
 func (s *Session) uidMoveCommand(tag string, args []string) error {
 	if len(args) != 2 {
 		return fmt.Errorf("UID MOVE requires UID set and destination")
 	}
-	uids, err := parseUIDSet(args[0])
+	uids, err := parseMoveUIDSet(args[0])
 	if err != nil {
 		return err
 	}
@@ -398,13 +454,23 @@ func (s *Session) uidMoveCommand(tag string, args []string) error {
 		return err
 	}
 	var frame bytes.Buffer
-	frame.Write(renderEvent(result.SourceEvent))
-	oldIDs, newIDs := []string{}, []string{}
+	// The actor is selected on the source: it receives the source expunge
+	// batch inline with its tagged response, exactly like EXPUNGE. The
+	// standalone "* REVISION" line is for other subscribers; the actor's
+	// revision rides on its tagged response instead, so drop it from this frame.
+	for _, seq := range result.SourceEvent.SeqNums {
+		fmt.Fprintf(&frame, "* %d EXPUNGE\r\n", seq)
+	}
+	fmt.Fprintf(&frame, "* %d EXISTS\r\n", result.SourceEvent.Exists)
+	oldIDs, newIDs := make([]string, 0, len(result.Mapping)), make([]string, 0, len(result.Mapping))
 	for _, mapping := range result.Mapping {
 		oldIDs = append(oldIDs, strconv.FormatInt(mapping.OldUID, 10))
 		newIDs = append(newIDs, strconv.FormatInt(mapping.NewUID, 10))
 	}
-	fmt.Fprintf(&frame, "%s OK [COPYUID %d %s %s] UID MOVE completed\r\n", tagToken(tag), result.DestinationValidity, strings.Join(oldIDs, ","), strings.Join(newIDs, ","))
+	fmt.Fprintf(&frame, "%s OK [COPYUID %d %s %s] [REVISION %d] UID MOVE completed\r\n",
+		tagToken(tag), result.DestinationValidity,
+		strings.Join(oldIDs, ","), strings.Join(newIDs, ","),
+		result.SourceRevision)
 	s.enqueue(frame.Bytes())
 	return nil
 }

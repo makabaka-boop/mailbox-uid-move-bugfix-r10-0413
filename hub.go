@@ -9,6 +9,9 @@ const (
 	EventStore
 	EventExpunge
 	EventMoveIn
+	// EventMoveOut is a source mailbox losing one whole UID MOVE batch in a
+	// single revision. Kept last so existing constant values stay stable.
+	EventMoveOut
 )
 
 // Event is one committed mailbox revision. It is rendered independently for
